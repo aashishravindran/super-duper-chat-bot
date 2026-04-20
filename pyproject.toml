@@ -1,0 +1,45 @@
+[project]
+name = "super-duper-chat-bot"
+version = "0.1.0"
+description = "Multi-agent assistant: LangGraph + RAG + GitHub MCP + Lambda"
+requires-python = ">=3.10"
+dependencies = [
+    # Core LangGraph / LangChain
+    "langgraph>=0.2.0",
+    "langchain-openai>=0.1.0",
+    "langchain-core>=0.2.0",
+    "langchain-community>=0.2.0",
+    "langchain-chroma>=0.1.0",
+    "langsmith>=0.1.0",
+    "python-dotenv>=1.0.0",
+
+    # RAG pipeline
+    "chromadb>=0.5.0",
+    "rank-bm25>=0.2.2",
+    "sentence-transformers>=3.0.0",  # cross-encoder reranking
+    "pypdf>=4.0.0",
+    "scikit-learn>=1.4.0",           # cosine_similarity for embedding router
+    "numpy>=1.26.0",
+
+    # GitHub MCP
+    "langchain-mcp-adapters>=0.1.0",
+
+    # API + Lambda
+    "fastapi>=0.100.0",
+    "uvicorn>=0.29.0",
+    "mangum>=0.17.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "httpx>=0.27.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
