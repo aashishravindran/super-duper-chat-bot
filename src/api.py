@@ -4,10 +4,12 @@ FastAPI layer: two endpoints.
   POST /chat/cancel   — cancel a pending interrupt (user said "no")
 
 Responses are Server-Sent Events (SSE) so the client sees tokens as they arrive.
+Each SSE payload is a discriminated union on the `type` field.
 """
-import json
+import time
 import uuid
 from contextlib import asynccontextmanager
+from typing import Annotated, Literal, Union
 
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
@@ -21,7 +23,7 @@ GRAPH = None
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(_app: FastAPI):
     global GRAPH
     GRAPH = await build_graph_with_memory()
     yield
@@ -30,7 +32,51 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Multi-Agent Assistant", lifespan=lifespan)
 
 
-# --- Request / Response models ---
+# ---------------------------------------------------------------------------
+# SSE event models — discriminated union on `type`
+# ---------------------------------------------------------------------------
+
+class ThreadIdEvent(BaseModel):
+    type: Literal["thread_id"] = "thread_id"
+    thread_id: str
+
+
+class TokenEvent(BaseModel):
+    type: Literal["token"] = "token"
+    content: str
+    node: str
+
+
+class LatencyEvent(BaseModel):
+    type: Literal["latency"] = "latency"
+    node: str
+    latency_ms: int
+
+
+class CustomEvent(BaseModel):
+    type: Literal["event"] = "event"
+    data: dict
+
+
+class InterruptEvent(BaseModel):
+    type: Literal["interrupt"] = "interrupt"
+    question: str
+    suggested_route: str | None = None
+
+
+ChatEvent = Annotated[
+    Union[ThreadIdEvent, TokenEvent, LatencyEvent, CustomEvent, InterruptEvent],
+    Field(discriminator="type"),
+]
+
+
+def _sse(event: BaseModel) -> str:
+    return f"data: {event.model_dump_json()}\n\n"
+
+
+# ---------------------------------------------------------------------------
+# Request / Response models
+# ---------------------------------------------------------------------------
 
 class ChatRequest(BaseModel):
     thread_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -38,15 +84,18 @@ class ChatRequest(BaseModel):
     resume: str | None = None
 
 
-class ChatResponse(BaseModel):
-    thread_id: str  # always returned so the client can continue the conversation
-
-
 class CancelRequest(BaseModel):
     thread_id: str
 
 
-# --- Endpoints ---
+class CancelResponse(BaseModel):
+    status: Literal["cancelled"]
+    thread_id: str
+
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
 
 @app.post("/chat")
 async def chat(req: ChatRequest) -> StreamingResponse:
@@ -59,29 +108,59 @@ async def chat(req: ChatRequest) -> StreamingResponse:
     )
 
     async def event_stream():
-        # First event: always send the thread_id so client knows what to use next
-        yield f"data: {json.dumps({'type': 'thread_id', 'thread_id': req.thread_id})}\n\n"
+        yield _sse(ThreadIdEvent(thread_id=req.thread_id))
+
+        node_start_times: dict[str, float] = {}
+        node_latencies: dict[str, int] = {}
+        streamed_ids: set[str] = set()
+        request_start = time.perf_counter()
 
         async for chunk in GRAPH.astream(
-            graph_input, config, stream_mode=["messages", "custom"]
+            graph_input, config, stream_mode=["messages", "custom", "updates"]
         ):
             mode, data = chunk
 
             if mode == "messages":
                 token, meta = data
+                msg_id = getattr(token, "id", None)
+                if msg_id and msg_id in streamed_ids:
+                    continue
+                if msg_id:
+                    streamed_ids.add(msg_id)
+                node = meta.get("langgraph_node", "")
+                if node and node not in node_start_times:
+                    node_start_times[node] = time.perf_counter()
                 if token.content:
-                    yield f"data: {json.dumps({'type': 'token', 'content': token.content, 'node': meta.get('langgraph_node', '')})}\n\n"
+                    yield _sse(TokenEvent(content=token.content, node=node))
+
+            elif mode == "updates":
+                for node_name in data:
+                    if node_name in node_start_times:
+                        node_latencies[node_name] = round(
+                            (time.perf_counter() - node_start_times[node_name]) * 1000
+                        )
 
             elif mode == "custom":
-                yield f"data: {json.dumps({'type': 'event', **data})}\n\n"
+                if data.get("type") == "interrupt":
+                    yield _sse(InterruptEvent(
+                        question=data.get("question", ""),
+                        suggested_route=data.get("suggested_route"),
+                    ))
+                else:
+                    yield _sse(CustomEvent(data=data))
 
+        for node_name, latency_ms in node_latencies.items():
+            yield _sse(LatencyEvent(node=node_name, latency_ms=latency_ms))
+
+        total_ms = round((time.perf_counter() - request_start) * 1000)
+        yield _sse(LatencyEvent(node="total", latency_ms=total_ms))
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
-@app.post("/chat/cancel")
-async def cancel(req: CancelRequest):
+@app.post("/chat/cancel", response_model=CancelResponse)
+async def cancel(req: CancelRequest) -> CancelResponse:
     config = {"configurable": {"thread_id": req.thread_id}}
     await GRAPH.ainvoke(Command(resume="cancel"), config)
-    return {"status": "cancelled", "thread_id": req.thread_id}
+    return CancelResponse(status="cancelled", thread_id=req.thread_id)

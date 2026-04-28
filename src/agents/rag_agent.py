@@ -30,24 +30,24 @@ Context:
 """
 
 
-def retrieve_node(state: State) -> dict:
+async def retrieve_node(state: State) -> dict:
     query = state["messages"][-1].content
     vs, bm25, texts = _get_indexes()
-    candidates = hybrid_retrieve(query, vs, bm25, texts, k=10)
+    candidates = await hybrid_retrieve(query, vs, bm25, texts, k=10)
     return {"rag_context": candidates}
 
 
-def rerank_node(state: State) -> dict:
+async def rerank_node(state: State) -> dict:
     query = state["messages"][-1].content
-    top_chunks = rerank(query, state["rag_context"], top_k=4)
+    top_chunks = await rerank(query, state["rag_context"], top_k=4)
     return {"rag_context": top_chunks}
 
 
-def generate_node(state: State) -> dict:
+async def generate_node(state: State) -> dict:
     query = state["messages"][-1].content
     context = "\n\n".join(c["text"] for c in state["rag_context"])
     prompt = SYSTEM_PROMPT.format(context=context)
-    response = get_llm().invoke([SystemMessage(content=prompt), *state["messages"]])
+    response = await get_llm().ainvoke([SystemMessage(content=prompt), *state["messages"]])
     return {"messages": [response]}
 
 

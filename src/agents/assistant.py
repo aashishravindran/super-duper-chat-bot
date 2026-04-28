@@ -50,8 +50,10 @@ Examples:
 
 _VERIFIER_PROMPT = ChatPromptTemplate.from_messages([
     ("system", """You are a quality checker. Given a user's query and an agent's response, decide if the response sufficiently answers the query.
-sufficient=true  → the response directly addresses what was asked
-sufficient=false → the response is incomplete, off-topic, or clearly missed the question"""),
+sufficient=true  → the response addresses the query, even partially or with caveats
+sufficient=false → the response is completely off-topic, refuses to answer, or returns an error
+
+Default to sufficient=true when in doubt. Only return false if the response clearly failed."""),
     ("human", "Query: {query}\n\nAgent response: {answer}"),
 ])
 
@@ -65,11 +67,9 @@ _llm = get_llm()
 
 # --- Node ---
 
-def call_assistant(state: State) -> dict:
-    # Path 1: route via LLM structured output (one fast call)
-    decision: RouteDecision = _router.invoke({"messages": state["messages"]})
+async def call_assistant(state: State) -> dict:
+    decision: RouteDecision = await _router.ainvoke({"messages": state["messages"]})
 
-    # Path 2: only interrupt when LLM is unsure — ask user to clarify
     if decision.confidence == "low":
         user_response = interrupt({
             "question": "I'm not sure — did you mean to ask about your GitHub repos or your resume?",
@@ -78,26 +78,24 @@ def call_assistant(state: State) -> dict:
         if user_response in ("github_agent", "rag_agent"):
             decision.route = user_response
 
-    # Path 3: direct answer — no subagent needed
     if decision.route == "direct":
-        response = _llm.invoke([
+        response = await _llm.ainvoke([
             SystemMessage(content="You are a helpful personal assistant."),
             *state["messages"],
         ])
         return {"messages": [response], "active_agent": "end"}
 
-    # Path 4: delegate to subagent
     return {"active_agent": decision.route}
 
 
-def verify_answer(state: State) -> dict:
-    """Critic node — runs after every subagent. Re-routes once if answer missed the query."""
+async def verify_answer(state: State) -> dict:
+    """Critic node — re-routes once only if the subagent clearly failed (not just partial)."""
     attempts = state.get("route_attempts", 0)
     human_msgs = [m for m in state["messages"] if isinstance(m, HumanMessage)]
     query = human_msgs[-1].content
     answer = state["messages"][-1].content
 
-    check = _verifier.invoke({"query": query, "answer": answer})
+    check = await _verifier.ainvoke({"query": query, "answer": answer})
     print(f"[verifier] sufficient={check.sufficient} attempts={attempts} query={query!r:.60}")
 
     if not check.sufficient and attempts < 1:

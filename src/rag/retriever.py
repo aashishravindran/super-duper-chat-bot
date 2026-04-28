@@ -11,7 +11,7 @@ def _rrf_score(rank: int, k: int = 60) -> float:
     return 1 / (rank + k)
 
 
-def hybrid_retrieve(
+async def hybrid_retrieve(
     query: str,
     vectorstore: Chroma,
     bm25: BM25Okapi,
@@ -26,13 +26,13 @@ def hybrid_retrieve(
     Interview explanation: RRF rewards chunks that appear high in *both* lists,
     combining lexical precision with semantic recall.
     """
-    # --- BM25 ---
+    # --- BM25 (CPU-bound but fast on small indexes) ---
     tokenized_query = query.lower().split()
     bm25_scores = bm25.get_scores(tokenized_query)
     bm25_ranked = sorted(range(len(bm25_scores)), key=lambda i: bm25_scores[i], reverse=True)[:k]
 
-    # --- ChromaDB vector search ---
-    chroma_results = vectorstore.similarity_search(query, k=k)
+    # --- ChromaDB vector search (async — avoids blocking the event loop) ---
+    chroma_results = await vectorstore.asimilarity_search(query, k=k)
     chroma_texts = [doc.page_content for doc in chroma_results]
 
     # --- RRF fusion ---
