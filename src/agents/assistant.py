@@ -7,6 +7,7 @@ interrupt() only fires when the router is genuinely unsure (confidence == "low")
 """
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END
 from langgraph.types import interrupt
 from pydantic import BaseModel
@@ -19,7 +20,7 @@ from src.state import State
 # --- Structured output schemas ---
 
 class RouteDecision(BaseModel):
-    route: Literal["github_agent", "rag_agent", "direct"]
+    route: Literal["github_agent", "rag_agent", "resume_agent", "direct"]
     confidence: Literal["high", "low"]
 
 
@@ -30,20 +31,23 @@ class VerificationDecision(BaseModel):
 _ROUTER_PROMPT = ChatPromptTemplate.from_messages([
     ("system", """You are a routing assistant. Decide which agent should handle the user's message.
 
-- "github_agent" → anything about code, repositories, projects, commits, files, or a specific repo by name
-- "rag_agent"    → anything about the resume: work history, skills, education, experience, background
-- "direct"       → general conversation, greetings, clarifications, or anything else
+- "github_agent"  → anything about code, repositories, projects, commits, files, or a specific repo by name
+- "rag_agent"     → anything about the resume: work history, skills, education, experience, background
+- "resume_agent"  → explicit request to rewrite, tailor, or update the resume for a job (includes a job description or URL)
+- "direct"        → general conversation, greetings, clarifications, or anything else
 
 Also set confidence:
 - "high" → you are sure about the route
 - "low"  → the query is ambiguous and a human should confirm
 
 Examples:
-  "Tell me about Sentinel"          → github_agent, high
-  "what repos do you have?"         → github_agent, high
-  "what's your work experience?"    → rag_agent, high
-  "hi there"                        → direct, high
-  "tell me about projects"          → github_agent, low  (ambiguous — could mean resume projects or repos)
+  "Tell me about Sentinel"                          → github_agent, high
+  "what repos do you have?"                         → github_agent, high
+  "what's your work experience?"                    → rag_agent, high
+  "rewrite my resume for this job: <url>"           → resume_agent, high
+  "tailor my resume for a senior ML engineer role"  → resume_agent, high
+  "hi there"                                        → direct, high
+  "tell me about projects"                          → github_agent, low
 """),
     ("placeholder", "{messages}"),
 ])
@@ -67,15 +71,24 @@ _llm = get_llm()
 
 # --- Node ---
 
-async def call_assistant(state: State) -> dict:
+async def call_assistant(state: State, config: RunnableConfig) -> dict:
+    role = config.get("configurable", {}).get("role", "user")
     decision: RouteDecision = await _router.ainvoke({"messages": state["messages"]})
+
+    # Non-admin users cannot access resume_agent
+    if decision.route == "resume_agent" and role != "admin":
+        response = await _llm.ainvoke([
+            SystemMessage(content="You are a helpful assistant. Politely explain that resume rewriting is only available to the owner of this assistant, not to external visitors."),
+            *state["messages"],
+        ])
+        return {"messages": [response], "active_agent": "end"}
 
     if decision.confidence == "low":
         user_response = interrupt({
-            "question": "I'm not sure — did you mean to ask about your GitHub repos or your resume?",
+            "question": "I'm not sure which agent to use — could you clarify?",
             "suggested_route": decision.route,
         })
-        if user_response in ("github_agent", "rag_agent"):
+        if user_response in ("github_agent", "rag_agent", "resume_agent"):
             decision.route = user_response
 
     if decision.route == "direct":

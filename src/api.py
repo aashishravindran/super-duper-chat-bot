@@ -87,6 +87,7 @@ class ChatRequest(BaseModel):
     thread_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     message: str | None = None
     resume: str | None = None
+    role: Literal["admin", "user"] = "user"
 
 
 class CancelRequest(BaseModel):
@@ -104,7 +105,7 @@ class CancelResponse(BaseModel):
 
 @app.post("/chat")
 async def chat(req: ChatRequest) -> StreamingResponse:
-    config = {"configurable": {"thread_id": req.thread_id}}
+    config = {"configurable": {"thread_id": req.thread_id, "role": req.role}}
 
     graph_input = (
         Command(resume=req.resume)
