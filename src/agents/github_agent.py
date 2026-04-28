@@ -17,10 +17,13 @@ When looking up repos or files, use list/get tools with owner='aashishravindran'
 search queries — GitHub's search API restricts user-scoped searches.
 
 Steps for a typical repo question:
-1. List repos for owner 'aashishravindran'
-2. Get the specific repo or file contents directly
+1. List repos for owner 'aashishravindran' to find the repo name
+2. Always fetch the README (get_file_contents with path='README.md') to answer questions about what a repo does — never rely on the description field alone, it is often null
 
-Always cite the repo name and file path in your answer.
+Rules:
+- If a repo description is null or uninformative, you MUST call get_file_contents to read the README before answering
+- Never tell the user to visit the repo themselves — fetch the content and summarize it
+- Always cite the repo name and file path in your answer
 """)
 
 _MCP_CONFIG = {
@@ -34,15 +37,15 @@ _MCP_CONFIG = {
 
 
 @tool
-def github_unavailable(query: str) -> str:
+def github_unavailable(_query: str) -> str:
     """Placeholder used when the GitHub MCP server is not reachable."""
     return "GitHub MCP server is not configured. Set GITHUB_TOKEN and ensure Node.js is installed."
 
 
 def _make_github_node(llm):
-    """Return a node function with the LLM baked in — avoids closures inside async scope."""
-    def call_github_llm(state: State) -> dict:
-        return {"messages": [llm.invoke([SYSTEM_PROMPT] + state["messages"])]}
+    """Return an async node function with the LLM baked in — avoids closures inside async scope."""
+    async def call_github_llm(state: State) -> dict:
+        return {"messages": [await llm.ainvoke([SYSTEM_PROMPT] + state["messages"])]}
     call_github_llm.__name__ = "call_github_llm"
     return call_github_llm
 

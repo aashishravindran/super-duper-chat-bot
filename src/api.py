@@ -64,8 +64,13 @@ class InterruptEvent(BaseModel):
     suggested_route: str | None = None
 
 
+class ErrorEvent(BaseModel):
+    type: Literal["error"] = "error"
+    message: str
+
+
 ChatEvent = Annotated[
-    Union[ThreadIdEvent, TokenEvent, LatencyEvent, CustomEvent, InterruptEvent],
+    Union[ThreadIdEvent, TokenEvent, LatencyEvent, CustomEvent, InterruptEvent, ErrorEvent],
     Field(discriminator="type"),
 ]
 
@@ -115,45 +120,58 @@ async def chat(req: ChatRequest) -> StreamingResponse:
         streamed_ids: set[str] = set()
         request_start = time.perf_counter()
 
-        async for chunk in GRAPH.astream(
-            graph_input, config, stream_mode=["messages", "custom", "updates"]
-        ):
-            mode, data = chunk
+        try:
+            async for chunk in GRAPH.astream(
+                graph_input, config, stream_mode=["messages", "custom", "updates"]
+            ):
+                mode, data = chunk
 
-            if mode == "messages":
-                token, meta = data
-                msg_id = getattr(token, "id", None)
-                if msg_id and msg_id in streamed_ids:
-                    continue
-                if msg_id:
-                    streamed_ids.add(msg_id)
-                node = meta.get("langgraph_node", "")
-                if node and node not in node_start_times:
-                    node_start_times[node] = time.perf_counter()
-                if token.content:
-                    yield _sse(TokenEvent(content=token.content, node=node))
-
-            elif mode == "updates":
-                for node_name in data:
-                    if node_name in node_start_times:
-                        node_latencies[node_name] = round(
-                            (time.perf_counter() - node_start_times[node_name]) * 1000
+                if mode == "messages":
+                    token, meta = data
+                    msg_id = getattr(token, "id", None)
+                    if msg_id and msg_id in streamed_ids:
+                        continue
+                    if msg_id:
+                        streamed_ids.add(msg_id)
+                    node = meta.get("langgraph_node", "")
+                    if node and node not in node_start_times:
+                        node_start_times[node] = time.perf_counter()
+                    raw = token.content
+                    if isinstance(raw, list):
+                        content = " ".join(
+                            block["text"] for block in raw
+                            if isinstance(block, dict) and block.get("type") == "text"
                         )
+                    else:
+                        content = raw
+                    if content:
+                        yield _sse(TokenEvent(content=content, node=node))
 
-            elif mode == "custom":
-                if data.get("type") == "interrupt":
-                    yield _sse(InterruptEvent(
-                        question=data.get("question", ""),
-                        suggested_route=data.get("suggested_route"),
-                    ))
-                else:
-                    yield _sse(CustomEvent(data=data))
+                elif mode == "updates":
+                    for node_name in data:
+                        if node_name in node_start_times:
+                            node_latencies[node_name] = round(
+                                (time.perf_counter() - node_start_times[node_name]) * 1000
+                            )
 
-        for node_name, latency_ms in node_latencies.items():
-            yield _sse(LatencyEvent(node=node_name, latency_ms=latency_ms))
+                elif mode == "custom":
+                    if data.get("type") == "interrupt":
+                        yield _sse(InterruptEvent(
+                            question=data.get("question", ""),
+                            suggested_route=data.get("suggested_route"),
+                        ))
+                    else:
+                        yield _sse(CustomEvent(data=data))
 
-        total_ms = round((time.perf_counter() - request_start) * 1000)
-        yield _sse(LatencyEvent(node="total", latency_ms=total_ms))
+            for node_name, latency_ms in node_latencies.items():
+                yield _sse(LatencyEvent(node=node_name, latency_ms=latency_ms))
+
+            total_ms = round((time.perf_counter() - request_start) * 1000)
+            yield _sse(LatencyEvent(node="total", latency_ms=total_ms))
+
+        except Exception as e:
+            yield _sse(ErrorEvent(message=str(e)))
+
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
